@@ -98,6 +98,12 @@ struct thread {
 	/* wake time*/
 	int64_t wakeup_tick;				/* Wakeup time. _ljw */
 
+	/* priority donate */
+	int priority_orig;					/* priority origin */
+	struct list acquired_locks;			/* acquired lock list */
+	
+	struct thread *waiting_thread;		/* thread wating for release */
+
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */
 	uint64_t *pml4;                     /* Page map level 4 */
@@ -147,6 +153,8 @@ int thread_get_load_avg (void);
 void do_iret (struct intr_frame *tf);
 
 bool thread_priority_less_eq(const struct list_elem *_a, const struct list_elem *_b, void *aux);
+
+void thread_update_priority(struct thread *lock_holder);
 
 
 #endif /* threads/thread.h */

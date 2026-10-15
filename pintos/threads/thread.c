@@ -319,18 +319,116 @@ thread_yield (void) {
 	intr_set_level (old_level);
 }
 
+/* 홀더의 우선순위와 donor 우선순위와 비교하여 */
+void thread_set_best_priority (struct thread *holder) {	
+	struct list_elem *e;
+	struct lock *lock;
+	struct thread *donor;
+	int best_priority = holder->priority_orig;
+
+	for (e = list_begin(&holder->acquired_locks); e != list_end(&holder->acquired_locks); e = list_next(e)) {
+		lock = list_entry(e, struct lock, elem);		
+		donor = list_entry(list_back(&lock->semaphore.waiters), struct thread, elem);
+
+		if (list_empty(&lock->semaphore.waiters)) continue;
+
+		if (donor->priority > best_priority) best_priority = donor->priority;
+	}		
+
+	holder->priority = best_priority;			
+}
 /* Sets the current thread's priority to NEW_PRIORITY. */
 /* set_priority는 thread_yield() 하므로 원자적 연산 도중 호출시 문제 발생수 있다*/
 void
 thread_set_priority (int new_priority) {
-	enum intr_level old_level;
+	enum intr_level old_level;		
+	struct thread *cur = thread_current();
+	int old_priority_orig = cur->priority_orig;
+	int old_priority = cur->priority;
 
 	old_level = intr_disable();
-	thread_current ()->priority = new_priority;
-	if(!list_empty(&ready_list) && new_priority < (list_entry (list_back(&ready_list),struct thread, elem))->priority)
+
+	cur->priority_orig = new_priority;
+
+	/* lock을 들고 있는 경우 */
+	if (!list_empty(&cur->acquired_locks)) {		
+		if (new_priority > cur->priority) 
+			cur->priority = new_priority;
+
+		/* 아직 실제로 donation을 받지 않은 경우 실효 우선 순위도 변경 */
+		if (old_priority_orig == old_priority) {
+			cur->priority = new_priority;
+		}
+
+		/* 기존 우선순위가 변경 전보다 낮아진다면 실효 우선순위는 도너 중 최댓값 */
+		if (cur->priority_orig < old_priority_orig) 						
+			thread_set_best_priority(cur);									
+	} else {
+		cur->priority = new_priority;		
+	}
+
+	if(!list_empty(&ready_list) && cur->priority < (list_entry (list_back(&ready_list),struct thread, elem))->priority)
 		thread_yield(); 
+	// if(!list_empty(&ready_list) && new_priority < (list_entry (list_back(&ready_list),struct thread, elem))->priority)
+	// 	thread_yield(); 
 
 	intr_set_level(old_level);
+}
+
+/* lock acquire에서만 호출 */
+void thread_donate_priority(struct thread *lock_holder) {
+	enum intr_level old_level;
+	struct list_elem *e;
+	struct thread *t = thread_current(); 
+
+	old_level = intr_disable();
+
+	// 홀더의 실효 우선순위와 도너의 우선순위 비교
+	// 도너 우선 순위가 더 높으면 홀더의 우선순위 변경
+	if (t->priority > lock_holder->priority) {
+		lock_holder->priority = t->priority;
+		list_sort(&ready_list, thread_priority_less_eq, NULL);
+	}
+
+	intr_set_level(old_level);
+}
+
+/* Donate priority to thread holding lock. Return highest priority _ljw */
+/* 1. lock을 들고 있는 thread의 acquired_locks 순회 */	
+/* 2. 각 lock waiter의 가장 높은 우선순위를 가진 스레드 확인 */
+/* 3. 가장 높은 우선순위 확인(각 lock waiter의 가장 높은 우선순위를 가진 스레드는 가장 뒤쪽에 있음)*/
+/* 4. 현재 스레드의 기존 우선순위와 비교하여 높은 우선순위를 priority에 저장 */
+void thread_update_priority(struct thread *lock_holder) {	
+	struct list_elem *e;		
+	struct lock* lock;		
+	struct thread *donor;
+	enum intr_level old_level;
+	//int best_priority = lock_holder->priority;
+	int best_priority = lock_holder->priority_orig;
+
+	old_level = intr_disable(); // 인터럽트 비활성화(261015 add)
+	
+	/* 가진 lock이 없다면 기존 우선 순위로 변경 */
+	if (list_empty(&lock_holder->acquired_locks)) {
+		lock_holder->priority = lock_holder->priority_orig; 	
+		intr_set_level(old_level);
+		return;
+	}
+		
+	/* holder의 우선순위보다 waiter 스레드의 우선순위가 높을 경우 업데이트 */
+	for (e = list_begin(&lock_holder->acquired_locks); e != list_end(&lock_holder->acquired_locks); e = list_next(e)) {
+		lock = list_entry(e, struct lock, elem);	
+
+		if (list_empty(&lock->semaphore.waiters)) continue;	
+
+		donor = list_entry(list_back(&lock->semaphore.waiters), struct thread, elem);
+
+		if (donor->priority > best_priority) best_priority = donor->priority;
+	}		
+
+	lock_holder->priority = best_priority;
+
+	intr_set_level(old_level); // 인터럽트 활성화(261015 add)	
 }
 
 /* Returns the current thread's priority. */
@@ -428,6 +526,11 @@ init_thread (struct thread *t, const char *name, int priority) {
 	t->tf.rsp = (uint64_t) t + PGSIZE - sizeof (void *);
 	t->priority = priority;
 	t->magic = THREAD_MAGIC;
+
+	/* Init for priority donation _ljw */
+	t->priority_orig = priority;	
+	list_init(&t->acquired_locks);
+	t->waiting_thread = NULL; 
 }
 
 /* Chooses and returns the next thread to be scheduled.  Should
